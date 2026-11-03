@@ -1,7 +1,6 @@
 // Part of SourceAFIS for .NET: https://sourceafis.machinezoo.com/net
 using System;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using SkiaSharp;
 using SourceAFIS.Engine.Primitives;
 
 // TODO: Research options for WSQ support.
@@ -32,7 +31,7 @@ namespace SourceAFIS
         /// <param name="height">Height of the image.</param>
         /// <param name="pixels">Image pixels ordered from top-left to bottom-right in horizontal rows.</param>
         /// <param name="options">Additional information about the image or <c>null</c> for default options.</param>
-        /// <exception cref="NullReferenceException">Thrown when <paramref name="pixels" /> is <c>null</c>.</exception>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="pixels" /> is <c>null</c>.</exception>
         /// <exception cref="ArgumentOutOfRangeException">
         /// Thrown when <paramref name="width" /> or <paramref name="height" /> is not positive
         /// or when <paramref name="pixels" /> length is not <c>width * height</c>.
@@ -77,9 +76,11 @@ namespace SourceAFIS
         /// in resolution specified by setting <see cref="FingerprintImageOptions.Dpi" />.
         /// </para>
         /// <para>
-        /// The image may be in any format commonly used to store fingerprint images, including PNG, JPEG, BMP, and TIFF.
-        /// SourceAFIS will try to decode the image using <a href="https://sixlabors.com/products/imagesharp/">ImageSharp</a> library.
-        /// Note that ImageSharp might not support all versions and variations of the mentioned formats.
+        /// Supported image formats include PNG, JPEG, and BMP. TIFF is not supported.
+        /// SourceAFIS will try to decode the image using <a href="https://github.com/mono/SkiaSharp">SkiaSharp</a> library.
+        /// SkiaSharp might not support all versions and variations of the mentioned formats.
+        /// Images must decode completely. Transparency is ignored, preserving the stored RGB values.
+        /// Image orientation and dimensions are preserved without automatic rotation or color space conversion.
         /// </para>
         /// </remarks>
         /// <seealso cref="FingerprintImage(int,int,byte[],FingerprintImageOptions)" />
@@ -89,22 +90,27 @@ namespace SourceAFIS
                 throw new ArgumentNullException(nameof(image));
             try
             {
-                using (var decoded = Image.Load<Argb32>(image))
+                using (var data = SKData.CreateCopy(image))
+                using (var codec = SKCodec.Create(data))
                 {
-                    Matrix = new DoubleMatrix(decoded.Width, decoded.Height);
-                    decoded.ProcessPixelRows(accessor =>
+                    if (codec == null)
+                        throw new InvalidOperationException("Unsupported or invalid image format.");
+                    // Unpremultiplied RGB and no destination color space preserve the stored color values.
+                    var info = new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+                    var result = codec.GetPixels(info, out byte[] pixels);
+                    if (result != SKCodecResult.Success)
+                        throw new InvalidOperationException($"Image decoding failed: {result}.");
+                    Matrix = new DoubleMatrix(info.Width, info.Height);
+                    for (int y = 0; y < Matrix.Height; ++y)
                     {
-                        for (int y = 0; y < Matrix.Height; ++y)
+                        int row = y * info.RowBytes;
+                        for (int x = 0; x < Matrix.Width; ++x)
                         {
-                            var span = accessor.GetRowSpan(y);
-                            for (int x = 0; x < Matrix.Width; ++x)
-                            {
-                                var pixel = span[x];
-                                var color = pixel.R + pixel.G + pixel.B;
-                                Matrix[x, y] = 1 - color * (1.0 / (3.0 * 255.0));
-                            }
+                            int pixel = row + 4 * x;
+                            var color = pixels[pixel] + pixels[pixel + 1] + pixels[pixel + 2];
+                            Matrix[x, y] = 1 - color * (1.0 / (3.0 * 255.0));
                         }
-                    });
+                    }
                 }
             }
             catch (Exception ex)
